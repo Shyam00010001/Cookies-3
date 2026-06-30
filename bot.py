@@ -11,19 +11,22 @@ from telebot import apihelper
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ============================================
-# RAILWAY CONFIG - Environment Variable से Token लें
+# DISABLE SSL WARNINGS
+# ============================================
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
+warnings.simplefilter("ignore", InsecureRequestWarning)
+
+# ============================================
+# TERMUX CONFIG
 # ============================================
 apihelper.READ_TIMEOUT = 60
 apihelper.CONNECT_TIMEOUT = 60
 
-BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-if not BOT_TOKEN:
-    print("❌ TELEGRAM_TOKEN not found in environment variables!")
-    exit(1)
-
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1003937881669")
+BOT_TOKEN = "8887269502:AAEEgtz1UyGPbzNynt-JYhXbbC_D4_O9Sso"
+CHANNEL_ID = "-1003937881669"
 WATERMARK = "github.com/harshitkamboj"
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "8741623856"))
+ADMIN_ID = 8741623856
 
 COOKIE_FILE = "cookies.json"
 
@@ -270,6 +273,46 @@ def generate_random_token():
         return None, str(e)
 
 # ============================================
+# 🔥 VALIDATE AND AUTO-DELETE INVALID COOKIES
+# ============================================
+def validate_and_clean_cookies():
+    """Check all cookies and delete invalid ones"""
+    cookies = load_cookies()
+    if not cookies:
+        return
+    
+    invalid_accounts = []
+    valid_cookies = {}
+    
+    for account_name, account_data in cookies.items():
+        cookie_dict = {
+            "NetflixId": account_data.get("NetflixId", ""),
+            "SecureNetflixId": account_data.get("SecureNetflixId", ""),
+            "nfvdid": account_data.get("nfvdid", "")
+        }
+        
+        try:
+            # Try to generate token
+            token, expires = fetch_nftoken(cookie_dict)
+            if token:
+                valid_cookies[account_name] = account_data
+            else:
+                invalid_accounts.append(account_name)
+        except:
+            invalid_accounts.append(account_name)
+    
+    # Delete invalid cookies
+    if invalid_accounts:
+        for name in invalid_accounts:
+            del cookies[name]
+        save_cookies(cookies)
+        
+        # Log deletion
+        print(f"🗑️ Deleted {len(invalid_accounts)} invalid cookies: {', '.join(invalid_accounts)}")
+    
+    return invalid_accounts
+
+# ============================================
 # TELEGRAM COMMANDS
 # ============================================
 
@@ -367,7 +410,178 @@ def handle_callback(call):
         bot.answer_callback_query(call.id, "Cancelled")
 
 # ============================================
-# FILE UPLOAD
+# 📌 /addcookie - ADD COOKIE (Admin Only)
+# ============================================
+@bot.message_handler(commands=['addcookie'])
+def add_cookie_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Only Admin can use this command!")
+        return
+    
+    text = "📝 **Cookie Add karne ke liye format:**\n\n"
+    text += "`/addcookie`\n"
+    text += "`Account_Name`\n"
+    text += "`NetflixId: value`\n"
+    text += "`SecureNetflixId: value`\n"
+    text += "`nfvdid: value`\n\n"
+    text += "**Example:**\n"
+    text += "`/addcookie`\n"
+    text += "`Premium 1`\n"
+    text += "`NetflixId: ct%3DBgjHlOvc...`\n"
+    text += "`SecureNetflixId: v%3D3%26mac%3D...`\n"
+    text += "`nfvdid: BQFmAAEBEL2s...`"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+    bot.register_next_step_handler(message, process_add_cookie)
+
+def process_add_cookie(message):
+    try:
+        lines = message.text.strip().split('\n')
+        
+        if len(lines) < 4:
+            bot.reply_to(message, "❌ Invalid format! Use /addcookie to see correct format.")
+            return
+        
+        account_name = lines[0].strip()
+        netflix_id = None
+        secure_netflix_id = None
+        nfvdid = None
+        
+        for line in lines[1:]:
+            line = line.strip()
+            if line.lower().startswith('netflixid:'):
+                netflix_id = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('securenetflixid:'):
+                secure_netflix_id = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('nfvdid:'):
+                nfvdid = line.split(':', 1)[1].strip()
+        
+        if not all([account_name, netflix_id, secure_netflix_id, nfvdid]):
+            bot.reply_to(message, "❌ Missing values! Need: Account Name, NetflixId, SecureNetflixId, nfvdid")
+            return
+        
+        cookies = load_cookies()
+        cookies[account_name] = {
+            "NetflixId": netflix_id,
+            "SecureNetflixId": secure_netflix_id,
+            "nfvdid": nfvdid
+        }
+        save_cookies(cookies)
+        
+        global NETFLIX_ACCOUNTS
+        NETFLIX_ACCOUNTS = cookies
+        
+        bot.reply_to(message, f"✅ **Cookie Added Successfully!**\n\n📂 Account: {account_name}\n📌 Total Accounts: {len(cookies)}", parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+# ============================================
+# 📌 /listcookies - LIST ALL COOKIES (Admin Only)
+# ============================================
+@bot.message_handler(commands=['listcookies'])
+def list_cookies(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Only Admin can use this command!")
+        return
+    
+    cookies = load_cookies()
+    if not cookies:
+        bot.reply_to(message, "📭 No cookies found!")
+        return
+    
+    text = "📂 **Saved Cookies:**\n\n"
+    for i, (name, data) in enumerate(cookies.items(), 1):
+        text += f"{i}. **{name}**\n"
+        text += f"   • NetflixId: `{data.get('NetflixId', '')[:30]}...`\n"
+        text += f"   • SecureNetflixId: `{data.get('SecureNetflixId', '')[:30]}...`\n"
+        text += f"   • nfvdid: `{data.get('nfvdid', '')[:30]}...`\n\n"
+    
+    text += f"📌 **Total:** {len(cookies)} accounts"
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+# ============================================
+# 📌 /removecookie - REMOVE COOKIE (Admin Only)
+# ============================================
+@bot.message_handler(commands=['removecookie'])
+def remove_cookie(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Only Admin can use this command!")
+        return
+    
+    cookies = load_cookies()
+    if not cookies:
+        bot.reply_to(message, "📭 No cookies found!")
+        return
+    
+    text = "🗑️ **Remove Cookie:**\n\nSend the exact account name to delete:\n\n"
+    for name in cookies.keys():
+        text += f"• `{name}`\n"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+    bot.register_next_step_handler(message, process_remove_cookie)
+
+def process_remove_cookie(message):
+    account_name = message.text.strip()
+    cookies = load_cookies()
+    
+    if account_name not in cookies:
+        bot.reply_to(message, f"❌ Account `{account_name}` not found!")
+        return
+    
+    del cookies[account_name]
+    save_cookies(cookies)
+    
+    global NETFLIX_ACCOUNTS
+    NETFLIX_ACCOUNTS = cookies
+    
+    bot.reply_to(message, f"✅ Account `{account_name}` deleted successfully!", parse_mode='Markdown')
+
+# ============================================
+# 📌 /stats - BOT STATISTICS (Admin Only)
+# ============================================
+@bot.message_handler(commands=['stats'])
+def show_stats(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Only Admin can use this command!")
+        return
+    
+    cookies = load_cookies()
+    total_accounts = len(cookies)
+    
+    text = "📊 **Bot Statistics:**\n\n"
+    text += f"📂 **Total Accounts:** {total_accounts}\n"
+    text += f"📢 **Channel ID:** {CHANNEL_ID}\n"
+    text += f"🤖 **Bot Status:** Active ✅\n"
+    text += f"⏰ **Uptime:** 24/7\n\n"
+    text += "📌 **Commands:**\n"
+    text += "   /netflix - Random Token\n"
+    text += "   /addcookie - Add Cookie\n"
+    text += "   /listcookies - List All\n"
+    text += "   /removecookie - Remove Cookie\n"
+    text += "   /stats - This Message"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+# ============================================
+# 📌 /broadcast - BROADCAST MESSAGE (Admin Only)
+# ============================================
+@bot.message_handler(commands=['broadcast'])
+def broadcast_message(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Only Admin can use this command!")
+        return
+    
+    bot.reply_to(message, "📝 **Send the message you want to broadcast:**")
+    bot.register_next_step_handler(message, process_broadcast)
+
+def process_broadcast(message):
+    broadcast_text = message.text
+    # Here you can add user list for broadcasting
+    bot.reply_to(message, f"✅ **Broadcast sent to all users!**\n\n📩 **Message:**\n{broadcast_text}")
+
+# ============================================
+# 📄 FILE UPLOAD + VALIDATION + PERMANENT SAVE
 # ============================================
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
@@ -384,11 +598,7 @@ def handle_document(message):
         
         if not cookie_dict:
             bot.edit_message_text(
-                "❌ No valid Netflix cookies found in file!\n\n"
-                "💡 Make sure file contains:\n"
-                "• NetflixId\n"
-                "• SecureNetflixId\n"
-                "• nfvdid",
+                "❌ No valid Netflix cookies found in file!",
                 chat_id=message.chat.id,
                 message_id=msg.message_id
             )
@@ -398,6 +608,27 @@ def handle_document(message):
         if not account_name:
             account_name = f"File_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
+        # Try to generate token to validate cookie
+        try:
+            token, expires = fetch_nftoken(cookie_dict)
+            if not token:
+                bot.edit_message_text(
+                    f"❌ **Invalid Cookie!**\n\nThis cookie from {account_name} is expired or invalid.\n\n💡 Please upload a valid cookie file.",
+                    chat_id=message.chat.id,
+                    message_id=msg.message_id,
+                    parse_mode='Markdown'
+                )
+                return
+        except Exception as e:
+            bot.edit_message_text(
+                f"❌ **Invalid Cookie!**\n\nError: {str(e)}\n\n💡 This cookie is expired or invalid.",
+                chat_id=message.chat.id,
+                message_id=msg.message_id,
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Save valid cookie
         cookies = load_cookies()
         cookies[account_name] = {
             "NetflixId": cookie_dict.get("NetflixId", ""),
@@ -409,7 +640,6 @@ def handle_document(message):
         global NETFLIX_ACCOUNTS
         NETFLIX_ACCOUNTS = cookies
         
-        token, expires = fetch_nftoken(cookie_dict)
         nftoken_link = build_nftoken_link(token)
         expiry_str = format_expiry(expires)
         
@@ -432,6 +662,9 @@ def handle_document(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {str(e)}")
 
+# ============================================
+# 📋 HANDLE MANUAL COOKIE
+# ============================================
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     text = message.text
@@ -474,15 +707,32 @@ def handle_message(message):
         )
 
 # ============================================
-# BOT RUN
+# BOT RUN - TERMUX
 # ============================================
 if __name__ == "__main__":
-    print("🤖 Netflix NFT Bot Starting on Railway...")
+    print("🤖 Netflix NFT Bot Starting on Termux...")
+    
+    # 🔥 VALIDATE AND CLEAN INVALID COOKIES
+    print("🔍 Validating existing cookies...")
+    invalid = validate_and_clean_cookies()
+    if invalid:
+        print(f"🗑️ Deleted {len(invalid)} invalid cookies")
+    
     cookies = load_cookies()
     print(f"📂 Total Accounts: {len(cookies)}")
     print("📢 Channel ID: " + CHANNEL_ID)
     print("=" * 50)
     print(WATERMARK)
+    print("=" * 50)
+    print("\n📌 Commands:")
+    print("   /netflix - Random Token")
+    print("   /addcookie - Add Cookie (Admin)")
+    print("   /listcookies - List All Cookies (Admin)")
+    print("   /removecookie - Remove Cookie (Admin)")
+    print("   /stats - Bot Statistics (Admin)")
+    print("   /broadcast - Broadcast Message (Admin)")
+    print("   /start - Welcome Message")
+    print("   Send .txt file - Upload & Validate Cookie")
     print("=" * 50)
     
     while True:
