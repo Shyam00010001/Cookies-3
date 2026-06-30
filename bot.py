@@ -18,29 +18,73 @@ from urllib3.exceptions import InsecureRequestWarning
 warnings.simplefilter("ignore", InsecureRequestWarning)
 
 # ============================================
-# TERMUX CONFIG
+# RAILWAY CONFIG - Environment Variables से लें
 # ============================================
 apihelper.READ_TIMEOUT = 60
 apihelper.CONNECT_TIMEOUT = 60
 
-BOT_TOKEN = "8887269502:AAEEgtz1UyGPbzNynt-JYhXbbC_D4_O9Sso"
-CHANNEL_ID = "-1003937881669"
-WATERMARK = "github.com/harshitkamboj"
-ADMIN_ID = 8741623856
+BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+if not BOT_TOKEN:
+    print("❌ TELEGRAM_TOKEN not found in environment variables!")
+    exit(1)
 
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1003937881669")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "8741623856"))
+WATERMARK = "github.com/harshitkamboj"
+
+# ============================================
+# FILES & DATABASE
+# ============================================
 COOKIE_FILE = "cookies.json"
+USERS_FILE = "users.json"
+LOG_FILE = "bot.log"
+
+def load_json(file_name, default={}):
+    if os.path.exists(file_name):
+        try:
+            with open(file_name, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return default
+    return default
+
+def save_json(file_name, data):
+    with open(file_name, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def log_message(msg):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] {msg}\n"
+    with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(log_entry)
+    print(log_entry.strip())
+
+# ============================================
+# LOAD DATA
+# ============================================
+NETFLIX_ACCOUNTS = load_json(COOKIE_FILE)
+USERS = load_json(USERS_FILE)
 
 def load_cookies():
-    if os.path.exists(COOKIE_FILE):
-        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+    return load_json(COOKIE_FILE)
 
 def save_cookies(cookies):
-    with open(COOKIE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cookies, f, indent=4, ensure_ascii=False)
+    save_json(COOKIE_FILE, cookies)
 
-NETFLIX_ACCOUNTS = load_cookies()
+def add_user(user_id, username):
+    users = load_json(USERS_FILE)
+    if str(user_id) not in users:
+        users[str(user_id)] = {
+            "username": username,
+            "first_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tokens_generated": 0
+        }
+        save_json(USERS_FILE, users)
+    else:
+        users[str(user_id)]["last_active"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        users[str(user_id)]["tokens_generated"] = users[str(user_id)].get("tokens_generated", 0) + 1
+        save_json(USERS_FILE, users)
 
 # ============================================
 # SHAYARI LIST
@@ -231,6 +275,7 @@ def save_to_channel(cookie_text, nftoken_link, expires, user_id, username, accou
         sent_msg = bot.send_message(CHANNEL_ID, message, parse_mode='Markdown')
         return True, sent_msg.message_id
     except Exception as e:
+        log_message(f"❌ Channel save error: {e}")
         return False, str(e)
 
 def get_random_account():
@@ -273,16 +318,14 @@ def generate_random_token():
         return None, str(e)
 
 # ============================================
-# 🔥 VALIDATE AND AUTO-DELETE INVALID COOKIES
+# VALIDATE AND AUTO-DELETE INVALID COOKIES
 # ============================================
 def validate_and_clean_cookies():
-    """Check all cookies and delete invalid ones"""
     cookies = load_cookies()
     if not cookies:
-        return
+        return []
     
     invalid_accounts = []
-    valid_cookies = {}
     
     for account_name, account_data in cookies.items():
         cookie_dict = {
@@ -292,23 +335,18 @@ def validate_and_clean_cookies():
         }
         
         try:
-            # Try to generate token
             token, expires = fetch_nftoken(cookie_dict)
-            if token:
-                valid_cookies[account_name] = account_data
-            else:
+            if not token:
                 invalid_accounts.append(account_name)
         except:
             invalid_accounts.append(account_name)
     
-    # Delete invalid cookies
     if invalid_accounts:
         for name in invalid_accounts:
-            del cookies[name]
+            if name in cookies:
+                del cookies[name]
         save_cookies(cookies)
-        
-        # Log deletion
-        print(f"🗑️ Deleted {len(invalid_accounts)} invalid cookies: {', '.join(invalid_accounts)}")
+        log_message(f"🗑️ Deleted {len(invalid_accounts)} invalid cookies: {', '.join(invalid_accounts)}")
     
     return invalid_accounts
 
@@ -318,6 +356,11 @@ def validate_and_clean_cookies():
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name or "Unknown"
+    add_user(user_id, username)
+    log_message(f"👤 New user: {username} ({user_id})")
+    
     random_shayari = random.choice(SHAYARI_LIST)
     
     text = "😵 **NETFLIX NF TOKEN** 😵\n\n"
@@ -338,6 +381,10 @@ def send_welcome(message):
 
 @bot.message_handler(commands=['netflix'])
 def show_netflix_button(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name or "Unknown"
+    add_user(user_id, username)
+    
     cookies = load_cookies()
     if not cookies:
         bot.reply_to(message, "📭 No accounts found!\n\nUpload a .txt file to add accounts.", parse_mode='Markdown')
@@ -394,6 +441,7 @@ def handle_callback(call):
         
         user_id = call.from_user.id
         username = call.from_user.username or call.from_user.first_name or "Unknown"
+        add_user(user_id, username)
         
         save_to_channel(
             result['cookie_string'],
@@ -410,8 +458,9 @@ def handle_callback(call):
         bot.answer_callback_query(call.id, "Cancelled")
 
 # ============================================
-# 📌 /addcookie - ADD COOKIE (Admin Only)
+# ADMIN COMMANDS
 # ============================================
+
 @bot.message_handler(commands=['addcookie'])
 def add_cookie_command(message):
     if message.from_user.id != ADMIN_ID:
@@ -468,17 +517,12 @@ def process_add_cookie(message):
         }
         save_cookies(cookies)
         
-        global NETFLIX_ACCOUNTS
-        NETFLIX_ACCOUNTS = cookies
-        
+        log_message(f"✅ Admin added cookie: {account_name}")
         bot.reply_to(message, f"✅ **Cookie Added Successfully!**\n\n📂 Account: {account_name}\n📌 Total Accounts: {len(cookies)}", parse_mode='Markdown')
         
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {str(e)}")
 
-# ============================================
-# 📌 /listcookies - LIST ALL COOKIES (Admin Only)
-# ============================================
 @bot.message_handler(commands=['listcookies'])
 def list_cookies(message):
     if message.from_user.id != ADMIN_ID:
@@ -500,9 +544,6 @@ def list_cookies(message):
     text += f"📌 **Total:** {len(cookies)} accounts"
     bot.reply_to(message, text, parse_mode='Markdown')
 
-# ============================================
-# 📌 /removecookie - REMOVE COOKIE (Admin Only)
-# ============================================
 @bot.message_handler(commands=['removecookie'])
 def remove_cookie(message):
     if message.from_user.id != ADMIN_ID:
@@ -532,14 +573,9 @@ def process_remove_cookie(message):
     del cookies[account_name]
     save_cookies(cookies)
     
-    global NETFLIX_ACCOUNTS
-    NETFLIX_ACCOUNTS = cookies
-    
+    log_message(f"🗑️ Admin removed cookie: {account_name}")
     bot.reply_to(message, f"✅ Account `{account_name}` deleted successfully!", parse_mode='Markdown')
 
-# ============================================
-# 📌 /stats - BOT STATISTICS (Admin Only)
-# ============================================
 @bot.message_handler(commands=['stats'])
 def show_stats(message):
     if message.from_user.id != ADMIN_ID:
@@ -547,10 +583,11 @@ def show_stats(message):
         return
     
     cookies = load_cookies()
-    total_accounts = len(cookies)
+    users = load_json(USERS_FILE)
     
     text = "📊 **Bot Statistics:**\n\n"
-    text += f"📂 **Total Accounts:** {total_accounts}\n"
+    text += f"📂 **Total Accounts:** {len(cookies)}\n"
+    text += f"👤 **Total Users:** {len(users)}\n"
     text += f"📢 **Channel ID:** {CHANNEL_ID}\n"
     text += f"🤖 **Bot Status:** Active ✅\n"
     text += f"⏰ **Uptime:** 24/7\n\n"
@@ -559,29 +596,92 @@ def show_stats(message):
     text += "   /addcookie - Add Cookie\n"
     text += "   /listcookies - List All\n"
     text += "   /removecookie - Remove Cookie\n"
-    text += "   /stats - This Message"
+    text += "   /stats - This Message\n"
+    text += "   /broadcast - Broadcast Message\n"
+    text += "   /users - List All Users"
     
     bot.reply_to(message, text, parse_mode='Markdown')
 
-# ============================================
-# 📌 /broadcast - BROADCAST MESSAGE (Admin Only)
-# ============================================
+@bot.message_handler(commands=['users'])
+def list_users(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Only Admin can use this command!")
+        return
+    
+    users = load_json(USERS_FILE)
+    if not users:
+        bot.reply_to(message, "👤 No users found!")
+        return
+    
+    text = "👤 **Users List:**\n\n"
+    for i, (user_id, data) in enumerate(users.items(), 1):
+        text += f"{i}. **{data.get('username', 'Unknown')}**\n"
+        text += f"   • ID: `{user_id}`\n"
+        text += f"   • First Seen: {data.get('first_seen', 'Unknown')}\n"
+        text += f"   • Tokens: {data.get('tokens_generated', 0)}\n\n"
+    
+    text += f"📌 **Total Users:** {len(users)}"
+    bot.reply_to(message, text, parse_mode='Markdown')
+
 @bot.message_handler(commands=['broadcast'])
 def broadcast_message(message):
     if message.from_user.id != ADMIN_ID:
         bot.reply_to(message, "❌ Only Admin can use this command!")
         return
     
-    bot.reply_to(message, "📝 **Send the message you want to broadcast:**")
+    bot.reply_to(message, "📝 **Send the message you want to broadcast:**\n\n(Reply with the message)")
     bot.register_next_step_handler(message, process_broadcast)
 
 def process_broadcast(message):
     broadcast_text = message.text
-    # Here you can add user list for broadcasting
-    bot.reply_to(message, f"✅ **Broadcast sent to all users!**\n\n📩 **Message:**\n{broadcast_text}")
+    users = load_json(USERS_FILE)
+    
+    if not users:
+        bot.reply_to(message, "❌ No users found to broadcast!")
+        return
+    
+    success_count = 0
+    fail_count = 0
+    
+    bot.reply_to(message, f"⏳ Broadcasting to {len(users)} users...")
+    
+    for user_id in users.keys():
+        try:
+            bot.send_message(
+                int(user_id),
+                f"📢 **Broadcast Message:**\n\n{broadcast_text}\n\n---\n🔹 Powered by Netflix NFT Bot",
+                parse_mode='Markdown'
+            )
+            success_count += 1
+            time.sleep(0.1)  # Rate Limit Avoid
+        except:
+            fail_count += 1
+    
+    log_message(f"📢 Broadcast sent to {success_count} users, failed: {fail_count}")
+    bot.reply_to(
+        message,
+        f"✅ **Broadcast Complete!**\n\n"
+        f"📨 **Sent:** {success_count} users\n"
+        f"❌ **Failed:** {fail_count} users\n"
+        f"📩 **Message:**\n{broadcast_text}"
+    )
+
+@bot.message_handler(commands=['cleancookies'])
+def clean_cookies(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Only Admin can use this command!")
+        return
+    
+    bot.reply_to(message, "⏳ Cleaning invalid cookies...")
+    invalid = validate_and_clean_cookies()
+    
+    if invalid:
+        bot.reply_to(message, f"🗑️ Deleted {len(invalid)} invalid cookies:\n{', '.join(invalid)}")
+    else:
+        bot.reply_to(message, "✅ All cookies are valid!")
 
 # ============================================
-# 📄 FILE UPLOAD + VALIDATION + PERMANENT SAVE
+# FILE UPLOAD
 # ============================================
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
@@ -593,7 +693,6 @@ def handle_document(message):
         content = downloaded_file.decode('utf-8', errors='ignore')
         
         file_name = message.document.file_name
-        
         cookie_dict = extract_cookie_dict(content)
         
         if not cookie_dict:
@@ -608,12 +707,12 @@ def handle_document(message):
         if not account_name:
             account_name = f"File_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
-        # Try to generate token to validate cookie
+        # Validate cookie
         try:
             token, expires = fetch_nftoken(cookie_dict)
             if not token:
                 bot.edit_message_text(
-                    f"❌ **Invalid Cookie!**\n\nThis cookie from {account_name} is expired or invalid.\n\n💡 Please upload a valid cookie file.",
+                    f"❌ **Invalid Cookie!**\n\nThis cookie is expired or invalid.",
                     chat_id=message.chat.id,
                     message_id=msg.message_id,
                     parse_mode='Markdown'
@@ -621,7 +720,7 @@ def handle_document(message):
                 return
         except Exception as e:
             bot.edit_message_text(
-                f"❌ **Invalid Cookie!**\n\nError: {str(e)}\n\n💡 This cookie is expired or invalid.",
+                f"❌ **Invalid Cookie!**\n\nError: {str(e)}",
                 chat_id=message.chat.id,
                 message_id=msg.message_id,
                 parse_mode='Markdown'
@@ -636,9 +735,6 @@ def handle_document(message):
             "nfvdid": cookie_dict.get("nfvdid", "")
         }
         save_cookies(cookies)
-        
-        global NETFLIX_ACCOUNTS
-        NETFLIX_ACCOUNTS = cookies
         
         nftoken_link = build_nftoken_link(token)
         expiry_str = format_expiry(expires)
@@ -656,14 +752,17 @@ def handle_document(message):
         
         user_id = message.from_user.id
         username = message.from_user.username or message.from_user.first_name or "Unknown"
+        add_user(user_id, username)
         
         save_to_channel(content, nftoken_link, expiry_str, user_id, username, account_name)
+        log_message(f"📄 File uploaded: {file_name} by {username}")
         
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {str(e)}")
+        log_message(f"❌ File upload error: {e}")
 
 # ============================================
-# 📋 HANDLE MANUAL COOKIE
+# HANDLE MANUAL COOKIE
 # ============================================
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
@@ -690,8 +789,9 @@ def handle_message(message):
             success += "📢 **Saved in Channel!**"
             
             bot.edit_message_text(success, msg.chat.id, msg.message_id, parse_mode='Markdown')
-            
+            add_user(user_id, username)
             save_to_channel(text, nftoken_link, expiry_str, user_id, username, "Manual Cookie")
+            log_message(f"🍪 Manual cookie by {username}")
             
         except Exception as e:
             bot.edit_message_text("❌ Error: " + str(e), msg.chat.id, msg.message_id)
@@ -707,38 +807,47 @@ def handle_message(message):
         )
 
 # ============================================
-# BOT RUN - TERMUX
+# BOT RUN
 # ============================================
 if __name__ == "__main__":
-    print("🤖 Netflix NFT Bot Starting on Termux...")
+    log_message("🤖 Netflix NFT Bot Starting...")
     
-    # 🔥 VALIDATE AND CLEAN INVALID COOKIES
-    print("🔍 Validating existing cookies...")
+    # Validate and clean cookies on startup
+    log_message("🔍 Validating existing cookies...")
     invalid = validate_and_clean_cookies()
     if invalid:
-        print(f"🗑️ Deleted {len(invalid)} invalid cookies")
+        log_message(f"🗑️ Deleted {len(invalid)} invalid cookies")
     
     cookies = load_cookies()
+    users = load_json(USERS_FILE)
+    
+    print("=" * 60)
+    print("🤖 NETFLIX NFT BOT")
+    print("=" * 60)
     print(f"📂 Total Accounts: {len(cookies)}")
-    print("📢 Channel ID: " + CHANNEL_ID)
-    print("=" * 50)
+    print(f"👤 Total Users: {len(users)}")
+    print(f"📢 Channel ID: {CHANNEL_ID}")
+    print(f"👑 Admin ID: {ADMIN_ID}")
+    print("=" * 60)
     print(WATERMARK)
-    print("=" * 50)
+    print("=" * 60)
     print("\n📌 Commands:")
+    print("   /start - Welcome Message")
     print("   /netflix - Random Token")
     print("   /addcookie - Add Cookie (Admin)")
     print("   /listcookies - List All Cookies (Admin)")
     print("   /removecookie - Remove Cookie (Admin)")
     print("   /stats - Bot Statistics (Admin)")
+    print("   /users - List All Users (Admin)")
     print("   /broadcast - Broadcast Message (Admin)")
-    print("   /start - Welcome Message")
+    print("   /cleancookies - Clean Invalid Cookies (Admin)")
     print("   Send .txt file - Upload & Validate Cookie")
-    print("=" * 50)
+    print("=" * 60)
     
     while True:
         try:
             bot.infinity_polling(timeout=60)
         except Exception as e:
-            print("⚠️ Error: " + str(e))
+            log_message(f"⚠️ Error: {e}")
             print("🔄 Reconnecting in 10 seconds...")
             time.sleep(10)
