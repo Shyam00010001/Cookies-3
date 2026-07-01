@@ -34,6 +34,7 @@ WATERMARK = "github.com/harshitkamboj"
 
 COOKIE_FILE = "cookies.json"
 USERS_FILE = "users.json"
+PROCESSING_FILE = "processing.json"  # Track processing status
 
 # ============================================
 # JSON FUNCTIONS
@@ -75,6 +76,12 @@ def add_user(user_id, username):
         users[str(user_id)]["last_active"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         users[str(user_id)]["tokens_generated"] = users[str(user_id)].get("tokens_generated", 0) + 1
         save_json(USERS_FILE, users)
+
+def update_processing_status(status):
+    save_json(PROCESSING_FILE, status)
+
+def get_processing_status():
+    return load_json(PROCESSING_FILE, {"is_processing": False, "current": 0, "total": 0, "last_account": ""})
 
 # ============================================
 # SHAYARI LIST
@@ -201,6 +208,58 @@ def extract_cookie_dict(text):
     
     return cookie_dict
 
+def extract_multiple_cookies(text):
+    """Extract multiple cookies from a text file - each cookie as separate entry"""
+    cookies_list = []
+    
+    # Split by common separators
+    # Try to find NetflixId patterns
+    lines = text.splitlines()
+    current_cookie = {}
+    current_text = ""
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Check if this line contains NetflixId (start of a new cookie)
+        if "NetflixId" in line and (current_text or current_cookie):
+            # Save previous cookie if exists
+            if current_text:
+                cookie_dict = extract_cookie_dict(current_text)
+                if cookie_dict and cookie_dict.get("NetflixId"):
+                    cookies_list.append(cookie_dict)
+            # Start new cookie
+            current_text = line + "\n"
+            current_cookie = {}
+        else:
+            current_text += line + "\n"
+    
+    # Don't forget the last cookie
+    if current_text:
+        cookie_dict = extract_cookie_dict(current_text)
+        if cookie_dict and cookie_dict.get("NetflixId"):
+            cookies_list.append(cookie_dict)
+    
+    # If no cookies found, try to extract from full text
+    if not cookies_list:
+        # Try to extract multiple cookies from text
+        # Look for NetflixId patterns
+        netflix_patterns = re.finditer(r'NetflixId[=:][^;,\s]+', text)
+        for match in netflix_patterns:
+            # Find the surrounding text for this cookie
+            start = max(0, match.start() - 200)
+            end = min(len(text), match.end() + 200)
+            cookie_text = text[start:end]
+            cookie_dict = extract_cookie_dict(cookie_text)
+            if cookie_dict and cookie_dict.get("NetflixId"):
+                # Check if already added
+                if not any(c.get("NetflixId") == cookie_dict.get("NetflixId") for c in cookies_list):
+                    cookies_list.append(cookie_dict)
+    
+    return cookies_list
+
 def build_nftoken_link(token):
     return "https://netflix.com/?nftoken=" + token
 
@@ -246,7 +305,6 @@ def format_expiry(expires):
         return str(expires)
 
 def split_long_message(text, max_length=4000):
-    """Long message को छोटे-छोटे parts में Split करें"""
     if len(text) <= max_length:
         return [text]
     
@@ -266,7 +324,6 @@ def split_long_message(text, max_length=4000):
     return parts
 
 def send_long_message(chat_id, text, parse_mode='HTML', reply_markup=None):
-    """Long message को Multiple Messages में Send करें"""
     parts = split_long_message(text)
     for i, part in enumerate(parts):
         try:
@@ -282,7 +339,6 @@ def send_long_message(chat_id, text, parse_mode='HTML', reply_markup=None):
 def save_to_channel(cookie_text, nftoken_link, expires, user_id, username, account_name="Unknown"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Cookie को छोटा करें (अगर बहुत बड़ी है)
     if len(cookie_text) > 3000:
         cookie_text = cookie_text[:3000] + "\n\n... (Cookie truncated, too long)"
     
@@ -300,7 +356,6 @@ def save_to_channel(cookie_text, nftoken_link, expires, user_id, username, accou
     message += "🔹 " + WATERMARK
     
     try:
-        # Long message को send करें
         send_long_message(CHANNEL_ID, message, parse_mode='Markdown')
         return True, "Sent"
     except Exception as e:
@@ -399,7 +454,7 @@ def send_welcome(message):
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += "📌 <b>Commands:</b>\n"
     text += "   🍪 /netflix - Random NFToken\n"
-    text += "   📄 Send .txt file - Upload Cookie\n"
+    text += "   📄 Send .txt file - Upload Multiple Cookies\n"
     text += "   📋 Send Cookie - Manual\n\n"
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += "✨ <b>Aaj ki Shayari:</b> ✨\n\n"
@@ -489,89 +544,254 @@ def handle_callback(call):
         bot.answer_callback_query(call.id, "Cancelled")
 
 # ============================================
-# 📄 FILE UPLOAD - BATCH PROCESSING + VALIDATION
+# 📄 FILE UPLOAD - MULTI-COOKIE PROCESSING
 # ============================================
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
     try:
-        msg = bot.reply_to(message, "📄 File Received! Processing...")
+        # Check if already processing
+        status = get_processing_status()
+        if status.get("is_processing", False):
+            bot.reply_to(message, 
+                f"⏳ <b>Already processing cookies!</b>\n\n"
+                f"📊 Progress: {status.get('current', 0)}/{status.get('total', 0)}\n"
+                f"📌 Last: {status.get('last_account', 'None')}\n\n"
+                f"Please wait until processing completes.",
+                parse_mode='HTML'
+            )
+            return
+        
+        msg = bot.reply_to(message, "📄 <b>File Received! Scanning for cookies...</b>", parse_mode='HTML')
         
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         content = downloaded_file.decode('utf-8', errors='ignore')
         
         file_name = message.document.file_name
-        cookie_dict = extract_cookie_dict(content)
         
-        if not cookie_dict or not cookie_dict.get("NetflixId"):
+        # Extract multiple cookies
+        cookies_list = extract_multiple_cookies(content)
+        
+        if not cookies_list:
             bot.edit_message_text(
-                "❌ No valid Netflix cookies found in file!\n\n"
+                "❌ <b>No valid Netflix cookies found in file!</b>\n\n"
                 "💡 Make sure file contains:\n"
                 "• NetflixId\n"
                 "• SecureNetflixId\n"
-                "• nfvdid",
-                chat_id=message.chat.id,
-                message_id=msg.message_id
-            )
-            return
-        
-        # 🔥 VALIDATE COOKIE BEFORE SAVING
-        is_valid, token, expires = validate_cookie(cookie_dict)
-        
-        if not is_valid:
-            bot.edit_message_text(
-                "❌ <b>Invalid Cookie!</b>\n\n"
-                "This cookie is expired or invalid.\n\n"
-                "💡 Please upload a valid cookie file.",
+                "• nfvdid\n\n"
+                "📌 Each cookie should have:\n"
+                "• NetflixId=xxx; SecureNetflixId=xxx; nfvdid=xxx",
                 chat_id=message.chat.id,
                 message_id=msg.message_id,
                 parse_mode='HTML'
             )
             return
         
-        # Generate account name
-        account_name = file_name.replace('.txt', '').replace('.cookie', '').replace('.netscape', '')
-        if not account_name:
-            account_name = f"File_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        total_cookies = len(cookies_list)
+        log_message(f"📄 File: {file_name} - Found {total_cookies} cookies")
         
-        # Save valid cookie
-        cookies = load_cookies()
+        # Update processing status
+        update_processing_status({
+            "is_processing": True,
+            "current": 0,
+            "total": total_cookies,
+            "last_account": "",
+            "file_name": file_name
+        })
         
-        # Check if account already exists
-        if account_name in cookies:
-            account_name = f"{account_name}_{datetime.now().strftime('%H%M%S')}"
+        bot.edit_message_text(
+            f"📄 <b>Processing {total_cookies} cookies...</b>\n\n"
+            f"⏳ Each cookie will be validated and added one by one.\n"
+            f"🕐 20 seconds gap between each cookie.\n\n"
+            f"📌 <b>Starting...</b>",
+            chat_id=message.chat.id,
+            message_id=msg.message_id,
+            parse_mode='HTML'
+        )
         
-        cookies[account_name] = {
-            "NetflixId": cookie_dict.get("NetflixId", ""),
-            "SecureNetflixId": cookie_dict.get("SecureNetflixId", ""),
-            "nfvdid": cookie_dict.get("nfvdid", "")
-        }
-        save_cookies(cookies)
+        # Process cookies one by one
+        valid_count = 0
+        invalid_count = 0
+        duplicate_count = 0
+        processed_cookies = []
         
-        nftoken_link = build_nftoken_link(token)
-        expiry_str = format_expiry(expires)
+        existing_cookies = load_cookies()
+        existing_ids = {c.get("NetflixId", "") for c in existing_cookies.values()}
         
-        success = "✅ <b>NFToken Ready!</b>\n\n"
-        success += f"📄 <b>File:</b> {file_name}\n"
-        success += f"📂 <b>Account:</b> {account_name}\n"
-        success += f"🔗 <b>Link:</b>\n<code>{nftoken_link}</code>\n\n"
-        success += f"⏰ <b>Expires:</b> <code>{expiry_str}</code>\n\n"
-        success += "💾 <b>Permanently Saved!</b>\n"
-        success += f"📌 <b>Total Accounts:</b> {len(cookies)}\n\n"
-        success += "📢 <b>Saved in Channel!</b>"
+        for i, cookie_dict in enumerate(cookies_list, 1):
+            status = get_processing_status()
+            status["current"] = i
+            update_processing_status(status)
+            
+            netflix_id = cookie_dict.get("NetflixId", "")
+            
+            # Check for duplicate
+            if netflix_id in existing_ids:
+                duplicate_count += 1
+                log_message(f"⚠️ Duplicate cookie found: {netflix_id[:30]}...")
+                
+                # Update progress message
+                try:
+                    bot.edit_message_text(
+                        f"📄 <b>Processing {total_cookies} cookies...</b>\n\n"
+                        f"✅ Valid: {valid_count}\n"
+                        f"❌ Invalid: {invalid_count}\n"
+                        f"⚠️ Duplicate: {duplicate_count}\n"
+                        f"⏳ Progress: {i}/{total_cookies}\n\n"
+                        f"🔄 <b>Cookie {i}/{total_cookies}:</b> ⚠️ DUPLICATE - Skipped\n"
+                        f"⏳ Waiting 20 seconds...",
+                        chat_id=message.chat.id,
+                        message_id=msg.message_id,
+                        parse_mode='HTML'
+                    )
+                except:
+                    pass
+                
+                time.sleep(20)
+                continue
+            
+            # Validate cookie
+            is_valid, token, expires = validate_cookie(cookie_dict)
+            
+            if not is_valid:
+                invalid_count += 1
+                log_message(f"❌ Invalid cookie: {netflix_id[:30]}...")
+                
+                # Update progress message
+                try:
+                    bot.edit_message_text(
+                        f"📄 <b>Processing {total_cookies} cookies...</b>\n\n"
+                        f"✅ Valid: {valid_count}\n"
+                        f"❌ Invalid: {invalid_count}\n"
+                        f"⚠️ Duplicate: {duplicate_count}\n"
+                        f"⏳ Progress: {i}/{total_cookies}\n\n"
+                        f"🔄 <b>Cookie {i}/{total_cookies}:</b> ❌ INVALID - Skipped\n"
+                        f"⏳ Waiting 20 seconds...",
+                        chat_id=message.chat.id,
+                        message_id=msg.message_id,
+                        parse_mode='HTML'
+                    )
+                except:
+                    pass
+                
+                time.sleep(20)
+                continue
+            
+            # Generate account name
+            account_name = file_name.replace('.txt', '').replace('.cookie', '').replace('.netscape', '')
+            if not account_name:
+                account_name = f"Account_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
+            # Add number if multiple
+            if total_cookies > 1:
+                account_name = f"{account_name}_{i}"
+            
+            # Check if account name exists
+            cookies = load_cookies()
+            if account_name in cookies:
+                account_name = f"{account_name}_{datetime.now().strftime('%H%M%S')}"
+            
+            # Save valid cookie
+            cookies[account_name] = {
+                "NetflixId": cookie_dict.get("NetflixId", ""),
+                "SecureNetflixId": cookie_dict.get("SecureNetflixId", ""),
+                "nfvdid": cookie_dict.get("nfvdid", "")
+            }
+            save_cookies(cookies)
+            existing_ids.add(netflix_id)
+            valid_count += 1
+            
+            # Update status
+            status = get_processing_status()
+            status["last_account"] = account_name
+            update_processing_status(status)
+            
+            log_message(f"✅ Added cookie: {account_name}")
+            
+            # Generate NFToken link
+            nftoken_link = build_nftoken_link(token)
+            expiry_str = format_expiry(expires)
+            
+            # Send to channel
+            cookie_string = f"NetflixId={cookie_dict.get('NetflixId', '')}"
+            if cookie_dict.get('SecureNetflixId'):
+                cookie_string += f"; SecureNetflixId={cookie_dict.get('SecureNetflixId', '')}"
+            if cookie_dict.get('nfvdid'):
+                cookie_string += f"; nfvdid={cookie_dict.get('nfvdid', '')}"
+            
+            save_to_channel(
+                cookie_string,
+                nftoken_link,
+                expiry_str,
+                message.from_user.id,
+                message.from_user.username or message.from_user.first_name or "Unknown",
+                account_name
+            )
+            
+            # Update progress message
+            try:
+                bot.edit_message_text(
+                    f"📄 <b>Processing {total_cookies} cookies...</b>\n\n"
+                    f"✅ Valid: {valid_count}\n"
+                    f"❌ Invalid: {invalid_count}\n"
+                    f"⚠️ Duplicate: {duplicate_count}\n"
+                    f"⏳ Progress: {i}/{total_cookies}\n\n"
+                    f"🔄 <b>Cookie {i}/{total_cookies}:</b> ✅ VALID - Added\n"
+                    f"📂 Account: {account_name}\n"
+                    f"⏳ Waiting 20 seconds...",
+                    chat_id=message.chat.id,
+                    message_id=msg.message_id,
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+            
+            # Wait 20 seconds before next cookie
+            if i < total_cookies:
+                time.sleep(20)
         
-        bot.edit_message_text(success, chat_id=message.chat.id, message_id=msg.message_id, parse_mode='HTML')
+        # Processing complete
+        update_processing_status({
+            "is_processing": False,
+            "current": 0,
+            "total": 0,
+            "last_account": "",
+            "file_name": ""
+        })
+        
+        # Final summary
+        summary = "✅ <b>Processing Complete!</b>\n\n"
+        summary += f"📄 <b>File:</b> {file_name}\n"
+        summary += f"📊 <b>Total Cookies:</b> {total_cookies}\n"
+        summary += f"✅ <b>Valid & Added:</b> {valid_count}\n"
+        summary += f"❌ <b>Invalid:</b> {invalid_count}\n"
+        summary += f"⚠️ <b>Duplicate:</b> {duplicate_count}\n\n"
+        summary += f"📂 <b>Total Accounts:</b> {len(load_cookies())}\n\n"
+        summary += "📢 <b>All valid cookies saved to channel!</b>"
+        
+        bot.edit_message_text(
+            summary,
+            chat_id=message.chat.id,
+            message_id=msg.message_id,
+            parse_mode='HTML'
+        )
         
         user_id = message.from_user.id
         username = message.from_user.username or message.from_user.first_name or "Unknown"
         add_user(user_id, username)
         
-        # 🔥 Save complete cookie to channel (with truncation if needed)
-        save_to_channel(content, nftoken_link, expiry_str, user_id, username, account_name)
-        log_message(f"📄 File uploaded: {file_name} by {username}")
+        log_message(f"📄 File processed: {file_name} by {username} - {valid_count} valid, {invalid_count} invalid, {duplicate_count} duplicate")
         
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
+        # Reset processing status on error
+        update_processing_status({
+            "is_processing": False,
+            "current": 0,
+            "total": 0,
+            "last_account": "",
+            "file_name": ""
+        })
+        bot.reply_to(message, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
         log_message(f"❌ File upload error: {e}")
 
 # ============================================
@@ -613,14 +833,14 @@ def handle_message(message):
             "🤔 Cookie nahi mili.\n\n"
             "📌 Use:\n"
             "• /netflix - Random NFToken\n"
-            "• Send .txt file - Upload Cookie\n"
+            "• Send .txt file - Upload Multiple Cookies\n"
             "• Send Cookie - Manual\n\n"
             "Cookie: NetflixId=xxx; SecureNetflixId=xxx",
             parse_mode='HTML'
         )
 
 # ============================================
-# ADMIN COMMANDS - FIXED
+# ADMIN COMMANDS
 # ============================================
 
 @bot.message_handler(commands=['addcookie'])
@@ -677,7 +897,6 @@ def process_add_cookie(message):
             "nfvdid": nfvdid
         }
         
-        # Validate before saving
         is_valid, token, expires = validate_cookie(cookie_dict)
         
         if not is_valid:
@@ -714,7 +933,6 @@ def list_cookies(message):
     
     text += f"📌 <b>Total:</b> {len(cookies)} accounts"
     
-    # Use send_long_message for large lists
     send_long_message(message.chat.id, text, parse_mode='HTML')
 
 @bot.message_handler(commands=['removecookie'])
@@ -757,6 +975,7 @@ def show_stats(message):
     
     cookies = load_cookies()
     users = load_json(USERS_FILE)
+    status = get_processing_status()
     
     text = "📊 <b>Bot Statistics:</b>\n\n"
     text += f"📂 <b>Total Accounts:</b> {len(cookies)}\n"
@@ -764,6 +983,13 @@ def show_stats(message):
     text += f"📢 <b>Channel ID:</b> {CHANNEL_ID}\n"
     text += f"🤖 <b>Bot Status:</b> Active ✅\n"
     text += f"⏰ <b>Uptime:</b> 24/7\n\n"
+    
+    if status.get("is_processing", False):
+        text += "🔄 <b>Processing Status:</b>\n"
+        text += f"   • Progress: {status.get('current', 0)}/{status.get('total', 0)}\n"
+        text += f"   • File: {status.get('file_name', 'Unknown')}\n"
+        text += f"   • Last Account: {status.get('last_account', 'None')}\n\n"
+    
     text += "📌 <b>Commands:</b>\n"
     text += "   /netflix - Random Token\n"
     text += "   /addcookie - Add Cookie\n"
@@ -771,7 +997,8 @@ def show_stats(message):
     text += "   /removecookie - Remove Cookie\n"
     text += "   /stats - This Message\n"
     text += "   /broadcast - Broadcast Message\n"
-    text += "   /users - List All Users"
+    text += "   /users - List All Users\n"
+    text += "   /cleancookies - Clean Invalid Cookies"
     
     bot.reply_to(message, text, parse_mode='HTML')
 
@@ -827,7 +1054,7 @@ def process_broadcast(message):
                 parse_mode='HTML'
             )
             success_count += 1
-            time.sleep(0.2)  # Rate limit
+            time.sleep(0.2)
         except:
             fail_count += 1
     
@@ -872,7 +1099,6 @@ def clean_cookies(message):
                 del cookies[name]
         save_cookies(cookies)
         
-        # Show invalid cookies in chunks
         invalid_list = "\n".join(invalid[:20])
         if len(invalid) > 20:
             invalid_list += f"\n... and {len(invalid)-20} more"
@@ -923,7 +1149,7 @@ if __name__ == "__main__":
     print("   /users - List All Users (Admin)")
     print("   /broadcast - Broadcast Message (Admin)")
     print("   /cleancookies - Clean Invalid Cookies (Admin)")
-    print("   Send .txt file - Upload & Validate Cookie")
+    print("   Send .txt file - Upload & Validate Multiple Cookies")
     print("=" * 60)
     
     while True:
